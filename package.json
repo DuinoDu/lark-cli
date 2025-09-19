@@ -1,0 +1,21 @@
+{
+  "name": "lark_doc",
+  "version": "1.0.0",
+  "description": "Simple CLI for Feishu Docs CRUD using Lark Node SDK",
+  "main": "src/cli.js",
+  "scripts": {
+    "start": "node src/cli.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.55.0",
+    "dotenv": "^17.2.2",
+    "yargs": "^18.0.0"
+  },
+  "bin": {
+    "lark-doc": "src/cli.js"
+  }
+}
