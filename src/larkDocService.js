@@ -2,6 +2,10 @@ const lark = require('@larksuiteoapi/node-sdk');
 
 const { Domain, withAll, withTenantKey, withUserAccessToken } = lark;
 
+function _logApiCall(description, functionName, params = {}) {
+  console.log(`[Lark API] ${description} - ${functionName}: ${JSON.stringify(params, null, 2)}`);
+}
+
 function buildRequestOptions({ tenantKey, userAccessToken }) {
   const options = [];
   if (tenantKey) {
@@ -17,18 +21,65 @@ function buildRequestOptions({ tenantKey, userAccessToken }) {
 }
 
 function toParagraphBlock(line) {
-  return {
-    block_type: 1,
-    text: {
-      elements: [
-        {
-          text_run: {
-            content: line,
+  const MAX_CHUNK_SIZE = 10000; // Maximum 100,000 UTF-16 characters
+
+  // If the line is within the limit, create a single block
+  if (line.length <= MAX_CHUNK_SIZE) {
+    return {
+      block_type: 2,
+      text: {
+        elements: [
+          {
+            text_run: {
+              content: line,
+            },
           },
-        },
-      ],
-    },
-  };
+        ],
+      },
+    };
+  }
+
+  // For lines exceeding the limit, split into multiple blocks
+  const blocks = [];
+  let start = 0;
+
+  while (start < line.length) {
+    const end = Math.min(start + MAX_CHUNK_SIZE, line.length);
+    const chunk = line.substring(start, end);
+
+    blocks.push({
+      block_type: 2,
+      text: {
+        elements: [
+          {
+            text_run: {
+              content: chunk,
+            },
+          },
+        ],
+      },
+    });
+
+    start = end;
+  }
+
+  return blocks;
+}
+
+function processTextToBlocks(text) {
+  const lines = text.split(/\r?\n/);
+  const blocks = [];
+
+  for (const line of lines) {
+    const result = toParagraphBlock(line);
+    if (Array.isArray(result)) {
+      blocks.push(...result);
+    } else {
+      blocks.push(result);
+    }
+  }
+
+  return blocks;
 }
 
 class LarkDocService {
@@ -46,7 +97,8 @@ class LarkDocService {
     this.requestOptions = buildRequestOptions({ tenantKey, userAccessToken });
   }
 
-  async createDocument({ title, folderToken, content, collaborators }) {
+  async createDocument({ title, folderToken, content, moveToWiki = false, wikiSpaceId, wikiNodeId, markdown = false }) {
+    _logApiCall('Create document', 'docx.document.create', { title, folderToken });
     const response = await this.client.docx.document.create(
       {
         data: {
@@ -63,17 +115,33 @@ class LarkDocService {
     }
 
     if (content !== undefined) {
-      await this.replaceDocumentContent(document.document_id, content);
+      await this._insertContentToDocument(document.document_id, content, markdown);
     }
 
-    if (Array.isArray(collaborators) && collaborators.length > 0) {
-      await this.addCollaborators(document.document_id, collaborators);
+    // Move document to wiki if requested
+    if (moveToWiki && wikiSpaceId && wikiNodeId) {
+      try {
+        const wikiNode = await this.moveDocumentToWiki(document.document_id, wikiSpaceId, wikiNodeId);
+        if (wikiNode) {
+          // Delete the original document after successful move
+          await this.deleteDocument(document.document_id);
+          return {
+            ...document,
+            wiki_node_token: wikiNode.node_token,
+            moved_to_wiki: true
+          };
+        }
+      } catch (error) {
+        console.error('Failed to move document to wiki, keeping original document:', error.message);
+        // Keep the original document if move fails
+      }
     }
 
     return document;
   }
 
   async getDocument(documentId) {
+    _logApiCall('Get document metadata', 'docx.document.get', { documentId });
     const response = await this.client.docx.document.get(
       {
         path: { document_id: documentId },
@@ -84,6 +152,7 @@ class LarkDocService {
   }
 
   async getRawContent(documentId) {
+    _logApiCall('Get document raw content', 'docx.document.rawContent', { documentId });
     const response = await this.client.docx.document.rawContent(
       {
         path: { document_id: documentId },
@@ -94,6 +163,7 @@ class LarkDocService {
   }
 
   async deleteDocument(documentId) {
+    _logApiCall('Delete document', 'drive.file.delete', { documentId });
     await this.client.drive.file.delete(
       {
         path: { file_token: documentId },
@@ -102,102 +172,148 @@ class LarkDocService {
     );
   }
 
-  async replaceDocumentContent(documentId, rawText) {
-    const pageBlock = await this._getPageBlock(documentId);
-    const childrenCount = pageBlock?.children?.length || 0;
-    const path = { document_id: documentId, block_id: pageBlock.block_id };
-
-    if (childrenCount > 0) {
-      await this.client.docx.documentBlockChildren.batchDelete(
-        {
-          path,
-          data: {
-            start_index: 0,
-            end_index: childrenCount,
-          },
-        },
-        this.requestOptions,
-      );
-    }
-
-    const lines = rawText.split(/\r?\n/);
-    if (!lines.length) {
+  async appendDocumentContent(documentId, rawText, isMarkdown = false) {
+    if (!rawText) {
       return;
     }
 
-    const children = lines.map(toParagraphBlock);
-    await this.client.docx.documentBlockChildren.create(
-      {
-        path,
-        data: {
-          index: 0,
-          children,
-        },
-      },
-      this.requestOptions,
-    );
+    // Append content to the end of the document
+    await this._appendContentToDocument(documentId, rawText, isMarkdown);
   }
 
-  async addCollaborators(documentId, collaborators) {
-    if (!Array.isArray(collaborators) || collaborators.length === 0) {
-      return;
+  async _appendContentToDocument(documentId, content, isMarkdown = false) {
+    // Step 1: Convert content to document blocks
+    let blocks;
+    if (isMarkdown) {
+      blocks = await this._convertContentToBlocks(content);
+    } else {
+      // For plain text, create simple paragraph blocks
+      blocks = processTextToBlocks(content);
     }
 
-    const normalized = collaborators
-      .map((item) => {
-        if (!item) {
-          return null;
-        }
-        const {
-          memberType,
-          memberId,
-          perm = 'edit',
-          needNotification = false,
-          permType,
-          entityType,
-        } = item;
+    // Step 2: Get document blocks to find the page block
+    const documentBlocks = await this._getDocumentBlocks(documentId);
 
-        if (!memberType || !memberId) {
-          return null;
-        }
-
-        return {
-          member_type: memberType,
-          member_id: memberId,
-          perm,
-          need_notification: needNotification,
-          perm_type: "container",
-          type: "user",
-        };
-      })
-      .filter(Boolean);
-
-    if (!normalized.length) {
-      return;
-    }
-
-    for (const collaborator of normalized) {
-      try {
-        const { need_notification, ...data } = collaborator;
-        await this.client.drive.permission.member.create(
+    // Step 3: Append content at the end of the document
+    if (documentBlocks.length > 0) {
+      const pageBlock = documentBlocks.find((block) => block?.page);
+      if (pageBlock) {
+        const childrenCount = pageBlock?.children?.length || 0;
+        _logApiCall('Append content blocks to document', 'docx.documentBlockChildren.create', {
+          documentId,
+          blockId: pageBlock.block_id,
+          index: childrenCount,
+          blockCount: blocks.length
+        });
+        await this.client.docx.documentBlockChildren.create(
           {
-            path: { token: documentId },
-            params: {
-              type: 'docx',
-              need_notification: need_notification,
+            path: { document_id: documentId, block_id: pageBlock.block_id },
+            data: {
+              index: childrenCount,
+              children: blocks,
             },
-            data,
           },
           this.requestOptions,
         );
-      } catch (error) {
-        console.error('Failed to add collaborator:', collaborator, error.message);
-        // Continue with other collaborators
       }
     }
   }
 
-  async _getPageBlock(documentId) {
+  async _insertContentToDocument(documentId, content, isMarkdown = false) {
+    // Step 1: Convert content to document blocks
+    let blocks;
+
+    if (isMarkdown) {
+      blocks = await this._convertContentToBlocks(content);
+    } else {
+      // For plain text, create simple paragraph blocks
+      blocks = processTextToBlocks(content);
+    }
+
+    // Step 2: Get document blocks to find the page block and count children
+    const documentBlocks = await this._getDocumentBlocks(documentId);
+
+    // Step 3: Insert content at the end of the document
+    if (documentBlocks.length > 0) {
+      const pageBlock = documentBlocks.find((block) => block?.page);
+      if (pageBlock) {
+        const childrenCount = pageBlock?.children?.length || 0;
+
+        // If blocks.length exceeds 50, split into multiple API calls
+        const MAX_BLOCKS_PER_CALL = 50;
+
+        if (blocks.length <= MAX_BLOCKS_PER_CALL) {
+          _logApiCall('Insert content blocks to document', 'docx.documentBlockChildren.create', {
+            documentId,
+            blockId: pageBlock.block_id,
+            index: childrenCount,
+            blockCount: blocks.length
+          });
+          await this.client.docx.documentBlockChildren.create(
+            {
+              path: { document_id: documentId, block_id: pageBlock.block_id },
+              data: {
+                index: childrenCount,
+                children: blocks,
+              },
+            },
+            this.requestOptions,
+          );
+        } else {
+          // Split blocks into chunks of MAX_BLOCKS_PER_CALL or less
+          let currentIndex = childrenCount;
+          for (let i = 0; i < blocks.length; i += MAX_BLOCKS_PER_CALL) {
+            const chunk = blocks.slice(i, i + MAX_BLOCKS_PER_CALL);
+            _logApiCall('Insert content blocks to document (chunked)', 'docx.documentBlockChildren.create', {
+              documentId,
+              blockId: pageBlock.block_id,
+              index: currentIndex,
+              chunk: i / MAX_BLOCKS_PER_CALL + 1,
+              totalChunks: Math.ceil(blocks.length / MAX_BLOCKS_PER_CALL),
+              blockCount: chunk.length
+            });
+            await this.client.docx.documentBlockChildren.create(
+              {
+                path: { document_id: documentId, block_id: pageBlock.block_id },
+                data: {
+                  index: currentIndex,
+                  children: chunk,
+                },
+              },
+              this.requestOptions,
+            );
+            currentIndex += chunk.length;
+          }
+        }
+      }
+    }
+  }
+
+  async _convertContentToBlocks(content) {
+    try {
+      _logApiCall('Convert content to document blocks', 'docx.documentBlock.convert', {
+        contentLength: content.length,
+        type: 'markdown'
+      });
+      const response = await this.client.docx.documentBlock.convert(
+        {
+          data: {
+            content,
+            type: 'markdown',
+          },
+        },
+        this.requestOptions,
+      );
+      return response?.data?.blocks || [];
+    } catch (error) {
+      console.error('Failed to convert content to blocks, falling back to simple text:', error.message);
+      // Fallback to simple text processing
+      return processTextToBlocks(content);
+    }
+  }
+
+  async _getDocumentBlocks(documentId) {
+    _logApiCall('Get document blocks', 'docx.documentBlock.list', { documentId, pageSize: 500 });
     const response = await this.client.docx.documentBlock.list(
       {
         path: { document_id: documentId },
@@ -207,13 +323,43 @@ class LarkDocService {
       },
       this.requestOptions,
     );
+    return response?.data?.items || [];
+  }
 
-    const items = response?.data?.items || [];
+  async _getPageBlock(documentId) {
+    const items = await this._getDocumentBlocks(documentId);
     const pageBlock = items.find((item) => item?.page);
     if (!pageBlock) {
       throw new Error('Unable to locate page block for document');
     }
     return pageBlock;
+  }
+
+  async moveDocumentToWiki(documentId, spaceId, nodeId) {
+    try {
+      _logApiCall('Move document to wiki', 'wiki.spaceNode.moveDocsToWiki', {
+        documentId,
+        spaceId,
+        nodeId,
+        objType: 'docx'
+      });
+      const response = await this.client.wiki.spaceNode.moveDocsToWiki(
+        {
+          path: { space_id: spaceId },
+          data: {
+            parent_wiki_token: nodeId,
+            obj_type: 'docx',
+            obj_token: documentId,
+          },
+        },
+        this.requestOptions,
+      );
+
+      return response?.data?.node;
+    } catch (error) {
+      console.error('Failed to move document to wiki:', error.message);
+      throw new Error(`Failed to move document to wiki: ${error.message}`);
+    }
   }
 }
 

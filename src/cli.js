@@ -8,9 +8,6 @@ const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
 const { LarkDocService } = require('./larkDocService');
 
-const DEFAULT_APP_ID = 'cli_a84736eb4038900d';
-const DEFAULT_APP_SECRET = 'LnZtpqFQBJGfQJlpbwu4RdprJSO2TYOB';
-
 function resolveContentInput({ content, contentFile }) {
   if (content !== undefined && contentFile) {
     throw new Error('Use either --content or --content-file, not both');
@@ -44,29 +41,9 @@ function parseCollaboratorEntry(entry) {
   };
 }
 
-function resolveCollaborators(argv) {
-  const entries = [];
-
-  if (process.env.LARK_DEFAULT_COLLABORATORS) {
-    entries.push(...process.env.LARK_DEFAULT_COLLABORATORS.split(','));
-  }
-
-  if (argv.collaborator) {
-    if (Array.isArray(argv.collaborator)) {
-      entries.push(...argv.collaborator);
-    } else {
-      entries.push(argv.collaborator);
-    }
-  }
-
-  return entries
-    .map(parseCollaboratorEntry)
-    .filter(Boolean);
-}
-
 function createService(argv) {
-  const appId = argv.appId || process.env.LARK_APP_ID || DEFAULT_APP_ID;
-  const appSecret = argv.appSecret || process.env.LARK_APP_SECRET || DEFAULT_APP_SECRET;
+  const appId = argv.appId || process.env.LARK_APP_ID;
+  const appSecret = argv.appSecret || process.env.LARK_APP_SECRET;
   const tenantKey = argv.tenantKey || process.env.LARK_TENANT_KEY;
   const userAccessToken = argv.userAccessToken || process.env.LARK_USER_ACCESS_TOKEN;
 
@@ -81,12 +58,19 @@ function createService(argv) {
 async function handleCreate(argv) {
   const service = createService(argv);
   const content = resolveContentInput(argv);
-  const collaborators = resolveCollaborators(argv);
+
+  // Get wiki configuration from environment or command line
+  const moveToWiki = argv.wiki || process.env.LARK_WIKI_AUTO_MOVE === 'true';
+  const wikiSpaceId = argv.wikiSpace || process.env.LARK_WIKI_SPACE_ID;
+  const wikiNodeId = argv.wikiNode || process.env.LARK_WIKI_ROOT_ID;
+
   const document = await service.createDocument({
     title: argv.title,
     folderToken: argv.folder,
     content,
-    collaborators,
+    moveToWiki,
+    wikiSpaceId,
+    wikiNodeId,
   });
 
   const output = {
@@ -94,6 +78,13 @@ async function handleCreate(argv) {
     title: document.title,
     revision_id: document.revision_id,
   };
+
+  // Add wiki info if document was moved
+  if (document.moved_to_wiki) {
+    output.wiki_node_token = document.wiki_node_token;
+    output.moved_to_wiki = true;
+  }
+
   console.log(JSON.stringify(output, null, 2));
 }
 
@@ -117,7 +108,7 @@ async function handleUpdate(argv) {
   if (content === undefined) {
     throw new Error('Update command requires --content or --content-file');
   }
-  await service.replaceDocumentContent(argv.documentId, content);
+  await service.appendDocumentContent(argv.documentId, content, argv.markdown);
   console.log(`Document ${argv.documentId} updated`);
 }
 
@@ -180,6 +171,26 @@ yargs(hideBin(process.argv))
           describe: 'Default collaborator definition in the form memberType:memberId[:perm] (repeatable)',
           type: 'string',
           array: true,
+        })
+        .option('markdown', {
+          alias: 'm',
+          describe: 'Treat content as markdown and convert to document blocks',
+          type: 'boolean',
+          default: false,
+        })
+        .option('wiki', {
+          alias: 'w',
+          describe: 'Move document to wiki after creation',
+          type: 'boolean',
+          default: false,
+        })
+        .option('wiki-space', {
+          describe: 'Wiki space ID (overrides LARK_WIKI_SPACE_ID env var)',
+          type: 'string',
+        })
+        .option('wiki-node', {
+          describe: 'Wiki node ID (overrides LARK_WIKI_ROOT_ID env var)',
+          type: 'string',
         }),
     (argv) =>
       handleCreate(argv).catch((err) => {
@@ -215,7 +226,7 @@ yargs(hideBin(process.argv))
   )
   .command(
     'update <documentId>',
-    'Replace the document content with provided text',
+    'Append content to the document',
     (cmd) =>
       cmd
         .positional('documentId', {
@@ -224,12 +235,18 @@ yargs(hideBin(process.argv))
         })
         .option('content', {
           alias: 'c',
-          describe: 'Replacement content',
+          describe: 'Content to append to the document',
           type: 'string',
         })
         .option('content-file', {
-          describe: 'Path to file that contains replacement content',
+          describe: 'Path to file that contains content to append',
           type: 'string',
+        })
+        .option('markdown', {
+          alias: 'm',
+          describe: 'Treat content as markdown and convert to document blocks',
+          type: 'boolean',
+          default: false,
         }),
     (argv) =>
       handleUpdate(argv).catch((err) => {
