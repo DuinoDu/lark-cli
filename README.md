@@ -10,11 +10,9 @@ A thin wrapper around the [Lark/Feishu Node SDK](https://github.com/larksuite/no
 Create a `.env` file (optional) and provide your credentials:
 
 ```
-LARK_APP_ID=cli_a84736eb4038900d
-LARK_APP_SECRET=LnZtpqFQBJGfQJlpbwu4RdprJSO2TYOB
-# LARK_TENANT_KEY=your-tenant-key     # only needed for ISV apps
+LARK_APP_ID=cli_xxx
+LARK_APP_SECRET=xxx
 # LARK_USER_ACCESS_TOKEN=xxx          # required for user scoped operations
-# LARK_DEFAULT_COLLABORATORS=openid:ou_xxx:edit,email:user@example.com:view
 ```
 
 Then install dependencies:
@@ -31,12 +29,6 @@ Run the CLI with `npm start -- <command>` or install it globally with `npm link`
 
 ```
 npm start -- create --title "Demo" --content "Hello from CLI"
-```
-
-Automatically add collaborators by repeating `--collaborator memberType:memberId[:perm]`:
-
-```
-npm start -- create --title "Demo" --collaborator openid:ou_xxx:edit --collaborator email:user@example.com:view
 ```
 
 You can also seed the document from a file:
