@@ -14,12 +14,14 @@ function resolveContentInput({ content, contentFile }) {
   }
   if (contentFile) {
     const fullPath = path.resolve(contentFile);
-    return fs.readFileSync(fullPath, 'utf8');
+    const value = fs.readFileSync(fullPath, 'utf8');
+    const isMarkdownHint = path.extname(fullPath).toLowerCase() === '.md';
+    return { content: value, isMarkdownHint };
   }
   if (content !== undefined) {
-    return content;
+    return { content, isMarkdownHint: false };
   }
-  return undefined;
+  return { content: undefined, isMarkdownHint: false };
 }
 
 function parseCollaboratorEntry(entry) {
@@ -57,7 +59,7 @@ function createService(argv) {
 
 async function handleCreate(argv) {
   const service = createService(argv);
-  const content = resolveContentInput(argv);
+  const { content, isMarkdownHint } = resolveContentInput(argv);
 
   // Get wiki configuration from environment or command line
   const moveToWiki = argv.wiki || process.env.LARK_WIKI_AUTO_MOVE === 'true';
@@ -68,6 +70,7 @@ async function handleCreate(argv) {
     title: argv.title,
     folderToken: argv.folder,
     content,
+    markdown: argv.markdown || isMarkdownHint,
     moveToWiki,
     wikiSpaceId,
     wikiNodeId,
@@ -104,11 +107,11 @@ async function handleRead(argv) {
 
 async function handleUpdate(argv) {
   const service = createService(argv);
-  const content = resolveContentInput(argv);
+  const { content, isMarkdownHint } = resolveContentInput(argv);
   if (content === undefined) {
     throw new Error('Update command requires --content or --content-file');
   }
-  await service.appendDocumentContent(argv.documentId, content, argv.markdown);
+  await service.appendDocumentContent(argv.documentId, content, argv.markdown || isMarkdownHint);
   console.log(`Document ${argv.documentId} updated`);
 }
 

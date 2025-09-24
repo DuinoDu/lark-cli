@@ -291,25 +291,70 @@ class LarkDocService {
 
   async _convertContentToBlocks(content) {
     try {
-      _logApiCall('Convert content to document blocks', 'docx.documentBlock.convert', {
+      _logApiCall('Convert content to document blocks', 'docx.document.convert', {
         contentLength: content.length,
-        type: 'markdown'
+        contentType: 'markdown'
       });
-      const response = await this.client.docx.documentBlock.convert(
+      const response = await this.client.docx.document.convert(
         {
           data: {
             content,
-            type: 'markdown',
+            content_type: 'markdown',
           },
         },
         this.requestOptions,
       );
-      return response?.data?.blocks || [];
+      const normalizedBlocks = this._reshapeConvertedBlocks(response?.data);
+      if (normalizedBlocks.length) {
+        return normalizedBlocks;
+      }
+      return processTextToBlocks(content);
     } catch (error) {
       console.error('Failed to convert content to blocks, falling back to simple text:', error.message);
       // Fallback to simple text processing
       return processTextToBlocks(content);
     }
+  }
+
+  _reshapeConvertedBlocks(convertedData = {}) {
+    const { blocks, first_level_block_ids: firstLevelBlockIds } = convertedData;
+    if (!blocks || !firstLevelBlockIds?.length) {
+      return [];
+    }
+
+    const blockMap = Array.isArray(blocks)
+      ? blocks.reduce((acc, block) => {
+        if (block?.block_id) {
+          acc[block.block_id] = block;
+        }
+        return acc;
+      }, {})
+      : blocks;
+
+    const buildBlock = (blockId) => {
+      const block = blockMap?.[blockId];
+      if (!block) {
+        return null;
+      }
+
+      const { block_id: _ignoredBlockId, parent_id: _ignoredParentId, children, ...rest } = block;
+      const sanitizedBlock = { ...rest };
+
+      if (Array.isArray(children) && children.length) {
+        const childBlocks = children
+          .map((childId) => buildBlock(childId))
+          .filter(Boolean);
+        if (childBlocks.length) {
+          sanitizedBlock.children = childBlocks;
+        }
+      }
+
+      return sanitizedBlock;
+    };
+
+    return firstLevelBlockIds
+      .map((blockId) => buildBlock(blockId))
+      .filter(Boolean);
   }
 
   async _getDocumentBlocks(documentId) {
