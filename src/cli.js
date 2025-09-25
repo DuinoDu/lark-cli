@@ -8,6 +8,73 @@ const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
 const { LarkDocService } = require('./larkDocService');
 
+function extractDocumentIdFromUrl(input) {
+  if (!input) {
+    return null;
+  }
+
+  const trimmed = String(input).trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  // If the input already looks like a token (no schema, no slashes), accept it as-is
+  if (!trimmed.includes('://') && !trimmed.includes('/')) {
+    return trimmed;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    const segments = url.pathname.split('/').filter(Boolean);
+    if (!segments.length) {
+      return null;
+    }
+
+    const docTypeIndex = segments.findIndex((segment) => segment === 'docx' || segment === 'docs');
+    if (docTypeIndex >= 0 && segments[docTypeIndex + 1]) {
+      return segments[docTypeIndex + 1];
+    }
+
+    // Fallback to last segment when doc type is not explicitly present
+    return segments[segments.length - 1];
+  } catch (error) {
+    return null;
+  }
+}
+
+function sanitizeFileName(name) {
+  const replaced = String(name || '')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!replaced) {
+    return 'document';
+  }
+
+  // Limit to a reasonable length to avoid filesystem issues
+  return replaced.slice(0, 120);
+}
+
+function resolveOutputPath({ output, title }) {
+  const sanitizedTitle = sanitizeFileName(title);
+  const defaultFileName = `${sanitizedTitle}.md`;
+
+  if (!output) {
+    return path.resolve(defaultFileName);
+  }
+
+  const resolved = path.resolve(output);
+  if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+    return path.join(resolved, defaultFileName);
+  }
+
+  if (path.extname(resolved).toLowerCase() === '.md') {
+    return resolved;
+  }
+
+  return `${resolved}.md`;
+}
+
 function resolveContentInput({ content, contentFile }) {
   if (content !== undefined && contentFile) {
     throw new Error('Use either --content or --content-file, not both');
@@ -124,6 +191,31 @@ async function handleDelete(argv) {
   const service = createService(argv);
   await service.deleteDocument(argv.documentId);
   console.log(`Document ${argv.documentId} deleted`);
+}
+
+async function handleDownload(argv) {
+  const documentId = extractDocumentIdFromUrl(argv.docUrl);
+  if (!documentId) {
+    throw new Error('Unable to determine document token from the provided URL');
+  }
+
+  const service = createService(argv);
+  const document = await service.getDocument(documentId);
+  if (!document) {
+    throw new Error(`Document ${documentId} not found`);
+  }
+
+  const rawContent = await service.getRawContent(documentId);
+  const outputPath = resolveOutputPath({ output: argv.output, title: document.title || documentId });
+
+  if (!argv.force && fs.existsSync(outputPath)) {
+    throw new Error(`File already exists at ${outputPath}. Use --force to overwrite.`);
+  }
+
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, rawContent ?? '', 'utf8');
+
+  console.log(`Markdown saved to ${outputPath}`);
 }
 
 yargs(hideBin(process.argv))
@@ -271,6 +363,32 @@ yargs(hideBin(process.argv))
       }),
     (argv) =>
       handleDelete(argv).catch((err) => {
+        console.error(err.message || err);
+        process.exit(1);
+      }),
+  )
+  .command(
+    'download <docUrl>',
+    'Download a Feishu doc as local markdown',
+    (cmd) =>
+      cmd
+        .positional('docUrl', {
+          describe: 'Feishu doc URL or document token',
+          type: 'string',
+        })
+        .option('output', {
+          alias: 'o',
+          describe: 'Output file path (defaults to document title). Directories will contain <title>.md',
+          type: 'string',
+        })
+        .option('force', {
+          alias: 'f',
+          describe: 'Overwrite the output file if it already exists',
+          type: 'boolean',
+          default: false,
+        }),
+    (argv) =>
+      handleDownload(argv).catch((err) => {
         console.error(err.message || err);
         process.exit(1);
       }),
