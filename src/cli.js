@@ -16,12 +16,13 @@ function resolveContentInput({ content, contentFile }) {
     const fullPath = path.resolve(contentFile);
     const value = fs.readFileSync(fullPath, 'utf8');
     const isMarkdownHint = path.extname(fullPath).toLowerCase() === '.md';
-    return { content: value, isMarkdownHint };
+    const titleHint = path.basename(fullPath, path.extname(fullPath));
+    return { content: value, isMarkdownHint, titleHint };
   }
   if (content !== undefined) {
-    return { content, isMarkdownHint: false };
+    return { content, isMarkdownHint: false, titleHint: undefined };
   }
-  return { content: undefined, isMarkdownHint: false };
+  return { content: undefined, isMarkdownHint: false, titleHint: undefined };
 }
 
 function parseCollaboratorEntry(entry) {
@@ -59,7 +60,11 @@ function createService(argv) {
 
 async function handleCreate(argv) {
   const service = createService(argv);
-  const { content, isMarkdownHint } = resolveContentInput(argv);
+  const { content, isMarkdownHint, titleHint } = resolveContentInput(argv);
+  const title = argv.title || titleHint;
+  if (!title) {
+    throw new Error('Document title is required. Provide --title or use --content-file to derive it from the file name.');
+  }
 
   // Get wiki configuration from environment or command line
   const moveToWiki = argv.wiki || process.env.LARK_WIKI_AUTO_MOVE === 'true';
@@ -67,7 +72,7 @@ async function handleCreate(argv) {
   const wikiNodeId = argv.wikiNode || process.env.LARK_WIKI_ROOT_ID;
 
   const document = await service.createDocument({
-    title: argv.title,
+    title,
     folderToken: argv.folder,
     content,
     markdown: argv.markdown || isMarkdownHint,
@@ -151,9 +156,8 @@ yargs(hideBin(process.argv))
       cmd
         .option('title', {
           alias: 't',
-          describe: 'Document title',
+          describe: 'Document title (defaults to content file name when omitted)',
           type: 'string',
-          demandOption: true,
         })
         .option('folder', {
           alias: 'f',
